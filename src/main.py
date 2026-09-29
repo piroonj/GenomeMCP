@@ -40,7 +40,7 @@ async def search_clinvar(term: str) -> str:
             f"  - Clinical Significance: {item['clinical_significance']}\n"
             f"  - Genes: {gene_str}\n"
             f"  - Accession: {item['accession']}\n"
-            f"  - Last Updated: {item['last_updated']}\n"
+            f"  - Last Evaluated: {item['last_updated']}\n"
         )
         output_lines.append(line)
         
@@ -68,7 +68,7 @@ async def get_variant_report(variant_id: str) -> str:
 - **ClinVar ID**: {item['id']}
 - **Accession**: {item['accession']}
 - **Clinical Significance**: {item['clinical_significance']}
-- **Last Updated**: {item['last_updated']}
+- **Last Evaluated**: {item['last_updated']}
 
 ## Genes
 {item.get('gene_names', 'N/A')}
@@ -101,7 +101,7 @@ async def get_supporting_literature(variant_id: str, max_results: int = 5) -> st
     if not papers:
         return f"Found PMIDs {top_pmids} but failed to retrieve details."
         
-    output_lines = [f"Found {len(top_pmids)} supporting papers (showing top 5):\n"]
+    output_lines = [f"Found {len(pmids)} linked papers (showing {len(papers)}):\n"]
     
     for p in papers:
         authors = ", ".join(p['authors'][:3])

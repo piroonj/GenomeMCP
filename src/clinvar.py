@@ -3,6 +3,7 @@ import xmltodict
 import json
 from typing import List, Dict, Any, Optional, Tuple
 import asyncio
+import re
 
 BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 DB = "clinvar"
@@ -23,10 +24,22 @@ async def _fetch_with_retry(client: httpx.AsyncClient, url: str, params: Dict[st
     # Final attempt
     return await client.get(url, params=params)
 
+# Bare gene symbols (e.g. BRCA1, HLA-B) get a [gene] tag; untagged they match any record mentioning them.
+_GENE_SYMBOL = re.compile(r"^[A-Z][A-Z0-9-]{1,14}$")
+
 async def search_clinvar(term: str, max_results: int = 5) -> List[str]:
     """
     Search ClinVar for a given term (gene, variant, condition) and return a list of IDs.
     """
+    term = term.strip()
+    if "[" not in term and _GENE_SYMBOL.match(term):
+        ids = await _esearch(f"{term}[gene]", max_results)
+        if ids:
+            return ids
+    return await _esearch(term, max_results)
+
+async def _esearch(term: str, max_results: int) -> List[str]:
+    """Run a ClinVar ESearch query and return the ID list."""
     params = {
         "db": DB,
         "term": term,
@@ -69,7 +82,7 @@ async def get_linked_pmids(clinvar_id: str) -> List[str]:
             for ls in linksets:
                 if "linksetdbs" in ls:
                     for db_entry in ls["linksetdbs"]:
-                        if db_entry["db"] == "pubmed":
+                        if db_entry.get("dbto") == "pubmed":
                             pmids.extend(db_entry.get("links", []))
             return list(set(pmids)) # deduplicate
         except KeyError:
@@ -96,8 +109,8 @@ async def get_gene_pmids(gene_id: str, max_results: int = 5) -> List[str]:
             pmids = []
             for ls in linksets:
                 for db in ls.get("linksetdbs", []):
-                    if db["db"] == "pubmed":
-                        pmids.extend(db["links"])
+                    if db.get("dbto") == "pubmed":
+                        pmids.extend(db.get("links", []))
             return pmids[:max_results]
         except KeyError:
             return []
@@ -349,12 +362,20 @@ async def get_variant_summaries(ids: List[str]) -> List[Dict[str, Any]]:
                     "gene_names": gene_names,
                     "variation_set": summary.get("variation_set", []),
                     "accession": summary.get("accession_version", "N/A"),
-                    "last_updated": summary.get("update_date", "N/A")
+                    "last_updated": _extract_last_evaluated(summary)
                 }
                 summaries.append(parsed)
             return summaries
         except KeyError:
              return []
+
+def _extract_last_evaluated(summary: Dict[str, Any]) -> str:
+    """ClinVar esummary has no update date; use the classification's last_evaluated date."""
+    for key in ("germline_classification", "oncogenicity_classification", "clinical_impact_classification"):
+        cls = summary.get(key)
+        if isinstance(cls, dict) and cls.get("last_evaluated"):
+            return cls["last_evaluated"].split(" ")[0]
+    return "N/A"
 
 def _extract_clinical_significance(summary: Dict[str, Any]) -> str:
     """Helper to extract cleaner clinical significance string."""
@@ -390,8 +411,10 @@ async def get_related_genes_by_phenotype(phenotype: str, max_limit: int = 50) ->
     Find genes frequently associated with a given phenotype in ClinVar.
     Returns a list of (GeneSymbol, frequency_count) sorted by frequency.
     """
-    # 1. Search for variants with this phenotype
-    ids = await search_clinvar(phenotype, max_results=max_limit)
+    # 1. Search for single-gene variants with this condition; multi-gene CNVs would count every gene they span
+    ids = await _esearch(f'"{phenotype.strip()}"[dis] AND single_gene[prop]', max_limit)
+    if not ids:
+        ids = await _esearch(phenotype, max_limit)
     if not ids:
         return []
         
